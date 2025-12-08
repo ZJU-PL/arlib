@@ -1,12 +1,18 @@
 """
-Conjunctive under-approximation
+Conjunctive/disjunctive satisfiability helpers with optional caching.
+
+Result encoding (shared across helpers):
+- 1: constraint satisfiable under the given precondition
+- 0: unsatisfiable
+- 2: unknown (e.g., solver returned unknown)
 """
 import z3
 from typing import List
 
 
 def unary_check_cached(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], results: List[int], check_list: List[int]):
-    for i in check_list:   
+    """Non-incremental check with model-based caching over a subset of constraints."""
+    for i in check_list:
         if results[i] is not None:
             continue
         solver = z3.Solver()
@@ -26,10 +32,11 @@ def unary_check_cached(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], results:
 
 
 def unary_check_incremental_cached(solver: z3.Solver, cnt_list: List[z3.ExprRef], results: List[int], check_list: List[int]):
-    for i in check_list:   
+    """Incremental version of unary_check_cached using a shared solver with push/pop."""
+    for i in check_list:
         if results[i] is not None:
             continue
-        solver.push()  # Save the current state        
+        solver.push()  # Save the current state
         solver.add(cnt_list[i])  # Add the current constraint
         res = solver.check()
         if res == z3.sat:
@@ -43,12 +50,13 @@ def unary_check_incremental_cached(solver: z3.Solver, cnt_list: List[z3.ExprRef]
         else:
             results[i] = 2
         solver.pop()  # Restore the state
-        
+
 
 def disjunctive_check_incremental_cached(solver: z3.Solver, cnt_list: List[z3.ExprRef], results: List[int], check_list: List[int]):
+    """Recursively solve a disjunction of pending constraints, caching satisfiable members."""
     f = z3.BoolVal(False)
     conditions = [cnt_list[i] for i in check_list if results[i] is None]
-    
+
     if len(conditions) == 0:
         return
 
@@ -56,7 +64,7 @@ def disjunctive_check_incremental_cached(solver: z3.Solver, cnt_list: List[z3.Ex
 
     if z3.is_false(f):
         return
-    
+
     solver.push()
     solver.add(f)
     res = solver.check()
@@ -76,26 +84,26 @@ def disjunctive_check_incremental_cached(solver: z3.Solver, cnt_list: List[z3.Ex
         disjunctive_check_incremental_cached(solver, cnt_list, results, new_check_list)
 
 
-def conjunctive_check_incremental(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], alogorithm: int = 0) -> List:    
+def conjunctive_check_incremental(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], alogorithm: int = 0) -> List:
     """
     Perform a conjunctive satisfiability check on a list of constraints under a given precondition.
-    This function checks whether the conjunction of a set of constraints (`cnt_list`) is satisfiable 
-    under a given precondition (`precond`). It uses a Z3 solver to perform the satisfiability checks 
+    This function checks whether the conjunction of a set of constraints (`cnt_list`) is satisfiable
+    under a given precondition (`precond`). It uses a Z3 solver to perform the satisfiability checks
     and supports different algorithms for handling unsatisfiable cores.
     Args:
         precond (z3.ExprRef): The precondition to be added to the solver.
         cnt_list (List[z3.ExprRef]): A list of Z3 expressions representing the constraints to be checked.
-        alogorithm (int): The algorithm to use for handling unsatisfiable cores. 
+        alogorithm (int): The algorithm to use for handling unsatisfiable cores.
                           Options are:
                           - 0: Unary check with caching.
                           - 1: Incremental unary check with caching.
                           - 2: Incremental disjunctive check with caching.
     Returns:
-        List: A list of results where each index corresponds to the satisfiability of the respective 
+        List: A list of results where each index corresponds to the satisfiability of the respective
               constraint in `cnt_list`. A value of `1` indicates satisfiable, `0` indicates unsatisfiable,
               and `2` indicates unknown.
     Notes:
-        - Unsatisfiable cores are handled by moving them to a waiting list for further processing 
+        - Unsatisfiable cores are handled by moving them to a waiting list for further processing
           based on the selected algorithm.
     """
     results = [None] * len(cnt_list)
@@ -115,7 +123,7 @@ def conjunctive_check_incremental(precond: z3.ExprRef, cnt_list: List[z3.ExprRef
                 solver.add(precond)
                 solver_result = solver.check()
                 solver.pop()
-                
+
                 if solver_result == z3.sat:
                     # All constraints are satisfiable
                     for idx in current_subset:
@@ -132,7 +140,7 @@ def conjunctive_check_incremental(precond: z3.ExprRef, cnt_list: List[z3.ExprRef
                     solver.push()
                     for idx in current_subset:
                         solver.assert_and_track(cnt_list[idx], str(idx))
-                
+
         elif solver_result == z3.unsat: # conflicts within the predicates, need to split
             solver.pop()
             unsat_core_indices = {int(c.decl().name()) for c in solver.unsat_core()}
@@ -147,7 +155,7 @@ def conjunctive_check_incremental(precond: z3.ExprRef, cnt_list: List[z3.ExprRef
                 for i, sat_item in enumerate(sat_set_indices):
                     subsets[i % len(unsat_set_indices)].append(sat_item)
                 queue.extend(subsets)
-                
+
     solver.add(precond)
     if alogorithm == 0:
         unary_check_cached(precond, cnt_list, results, waiting_list_idx)
@@ -161,26 +169,26 @@ def conjunctive_check_incremental(precond: z3.ExprRef, cnt_list: List[z3.ExprRef
     return results
 
 
-def conjunctive_check(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], alogorithm: int = 0) -> List:    
+def conjunctive_check(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], alogorithm: int = 0) -> List:
     """
     Perform a conjunctive satisfiability check on a list of constraints under a given precondition.
-    This function checks whether the conjunction of a set of constraints (`cnt_list`) is satisfiable 
-    under a given precondition (`precond`). It uses a Z3 solver to perform the satisfiability checks 
+    This function checks whether the conjunction of a set of constraints (`cnt_list`) is satisfiable
+    under a given precondition (`precond`). It uses a Z3 solver to perform the satisfiability checks
     and supports different algorithms for handling unsatisfiable cores.
     Args:
         precond (z3.ExprRef): The precondition to be added to the solver.
         cnt_list (List[z3.ExprRef]): A list of Z3 expressions representing the constraints to be checked.
-        alogorithm (int): The algorithm to use for handling unsatisfiable cores. 
+        alogorithm (int): The algorithm to use for handling unsatisfiable cores.
                           Options are:
                           - 0: Unary check with caching.
                           - 1: Incremental unary check with caching.
                           - 2: Incremental disjunctive check with caching.
     Returns:
-        List: A list of results where each index corresponds to the satisfiability of the respective 
+        List: A list of results where each index corresponds to the satisfiability of the respective
               constraint in `cnt_list`. A value of `1` indicates satisfiable, `0` indicates unsatisfiable,
               and `2` indicates unknown.
     Notes:
-        - Unsatisfiable cores are handled by moving them to a waiting list for further processing 
+        - Unsatisfiable cores are handled by moving them to a waiting list for further processing
           based on the selected algorithm.
     """
     results = [None] * len(cnt_list)
@@ -201,7 +209,7 @@ def conjunctive_check(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], alogorith
                 for idx in current_subset:
                         solver_check.assert_and_track(cnt_list[idx], str(idx))
                 solver_result = solver_check.check()
-                
+
                 if solver_result == z3.sat:
                     # All constraints are satisfiable
                     for idx in current_subset:
@@ -215,7 +223,7 @@ def conjunctive_check(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], alogorith
                         waiting_list_idx.append(int(str(idx)))
                     if len(current_subset) == 0:
                         break
-                
+
         elif solver_result == z3.unsat: # conflicts within the predicates, need to split
             unsat_core_indices = {int(c.decl().name()) for c in solver_split.unsat_core()}
             unsat_set_indices = list(unsat_core_indices)
@@ -229,7 +237,7 @@ def conjunctive_check(precond: z3.ExprRef, cnt_list: List[z3.ExprRef], alogorith
                 for i, sat_item in enumerate(sat_set_indices):
                     subsets[i % len(unsat_set_indices)].append(sat_item)
                 queue.extend(subsets)
-    
+
     solver_fallback = z3.Solver()
     solver_fallback.add(precond)
     if alogorithm == 0:

@@ -23,13 +23,19 @@ Examples:
 
 import sys
 import re
-from typing import Any, List, Union
+from typing import Any, List, Tuple, Union
+
+
+class SMT2NLParseError(Exception):
+    """Raised when SMT-LIB parsing fails."""
 
 
 class SMT2NLConverter:
     """Converts SMT-LIB S-expressions to natural language."""
 
     def __init__(self):
+        # Cap nesting to prevent runaway recursion on malformed input.
+        self.max_nesting_depth = 2000
         self.ops = {
             # Core
             '=': 'equals', '!=': 'not equals', 'distinct': 'are distinct',
@@ -107,28 +113,73 @@ class SMT2NLConverter:
     def parse_sexpr(self, s: str) -> Union[str, List[Any]]:
         """Parse S-expression into nested list structure."""
         s = s.strip()
+        if not s:
+            raise SMT2NLParseError("Empty SMT-LIB expression")
+
+        tokens = self._tokenize(s)
+        if not tokens:
+            raise SMT2NLParseError("No tokens parsed from SMT-LIB input")
+
+        # Validate before parsing to surface structural issues early.
+        self._validate_and_count_top_level(tokens)
+
         if not s.startswith('('):
             return s
-        tokens = self._tokenize(s)
-        return self._parse_tokens(tokens)[0]
+
+        parsed, _ = self._parse_tokens(tokens, depth=1)
+        return parsed
 
     def _tokenize(self, s: str) -> List[str]:
         return re.findall(r'\(|\)|[^()\s]+', s)
 
-    def _parse_tokens(self, tokens: List[str]) -> tuple:
-        """Parse tokens into nested structure."""
+    def _parse_tokens(self, tokens: List[str], depth: int = 1) -> Tuple[Union[str, List[Any]], int]:
+        """Parse tokens into nested structure with basic validation."""
         if not tokens:
-            return None, 0
+            raise SMT2NLParseError("Unexpected end of tokens")
 
-        if tokens[0] == '(':
-            result, i = [], 1
-            while i < len(tokens) and tokens[i] != ')':
-                expr, consumed = self._parse_tokens(tokens[i:])
-                result.append(expr)
-                i += consumed
-            return result, i + 1
-        else:
-            return tokens[0], 1
+        token = tokens[0]
+        if token == ')':
+            raise SMT2NLParseError("Unexpected ')'")
+        if token != '(':
+            return token, 1
+
+        if depth > self.max_nesting_depth:
+            raise SMT2NLParseError("Exceeded maximum nesting depth")
+
+        result: List[Any] = []
+        i = 1
+        while i < len(tokens):
+            if tokens[i] == ')':
+                return result, i + 1
+            expr, consumed = self._parse_tokens(tokens[i:], depth + 1)
+            result.append(expr)
+            i += consumed
+
+        raise SMT2NLParseError("Unbalanced parentheses: missing ')'")
+
+    def _validate_and_count_top_level(self, tokens: List[str]) -> int:
+        if not tokens:
+            raise SMT2NLParseError("No tokens parsed from SMT-LIB input")
+
+        depth = 0
+        top_level_count = 0
+
+        for t in tokens:
+            if t == '(':
+                if depth == 0:
+                    top_level_count += 1
+                depth += 1
+                if depth > self.max_nesting_depth:
+                    raise SMT2NLParseError("Exceeded maximum nesting depth")
+            elif t == ')':
+                depth -= 1
+                if depth < 0:
+                    raise SMT2NLParseError("Unbalanced parentheses: extra ')'")
+
+        if depth != 0:
+            raise SMT2NLParseError("Unbalanced parentheses: missing ')'")
+
+        return top_level_count
 
     def convert_expr(self, expr: Union[str, List[Any]]) -> str:
         if isinstance(expr, str):
@@ -237,20 +288,24 @@ class SMT2NLConverter:
     def convert(self, smt_text: str) -> str:
         try:
             smt_text = re.sub(r';.*$', '', smt_text, flags=re.MULTILINE).strip()
+            if not smt_text:
+                raise SMT2NLParseError("Empty SMT-LIB input")
+
             return (self._convert_multiple(smt_text) if self._has_multiple_expressions(smt_text)
-                   else self.convert_expr(self.parse_sexpr(smt_text)))
+                    else self.convert_expr(self.parse_sexpr(smt_text)))
+        except SMT2NLParseError as e:
+            return f"Error: {e}"
         except Exception as e:
             return f"Error: {e}"
 
     def _has_multiple_expressions(self, smt_text: str) -> bool:
-        tokens, depth, count = self._tokenize(smt_text), 0, 0
-        for t in tokens:
-            if t == '(' and depth == 0: count += 1
-            depth += 1 if t == '(' else -1 if t == ')' else 0
-        return count > 1
+        tokens = self._tokenize(smt_text)
+        top_level = self._validate_and_count_top_level(tokens)
+        return top_level > 1
 
     def _convert_multiple(self, smt_text: str) -> str:
         tokens, exprs, i = self._tokenize(smt_text), [], 0
+        self._validate_and_count_top_level(tokens)
         while i < len(tokens):
             if tokens[i] == '(':
                 depth, start = 1, i
@@ -258,6 +313,8 @@ class SMT2NLConverter:
                 while i < len(tokens) and depth > 0:
                     depth += 1 if tokens[i] == '(' else -1 if tokens[i] == ')' else 0
                     i += 1
+                if depth != 0:
+                    raise SMT2NLParseError("Unbalanced parentheses while splitting expressions")
                 expr_text = ' '.join(tokens[start:i])
                 exprs.append(self.convert_expr(self.parse_sexpr(expr_text)))
             else:
@@ -281,7 +338,8 @@ def main():
     converter = SMT2NLConverter()
 
     if len(sys.argv) > 1:
-        result = converter.convert(sys.argv[1])
+        smt_text = " ".join(sys.argv[1:])
+        result = converter.convert(smt_text)
         print(result)
     else:
         print("SMT-LIB to Natural Language Converter")
@@ -295,7 +353,7 @@ def main():
                     result = converter.convert(smt_text)
                     print(f"NL>  {result}")
                     print()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
             print("\nGoodbye!")
 
 
